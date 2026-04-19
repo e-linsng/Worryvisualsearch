@@ -1,0 +1,1692 @@
+---
+title: "WorryVisualSearch"
+output: html_document
+date: "2025-11-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Set enviorment and load packages 
+```{r include=FALSE}
+
+# clear the environment
+rm(list = ls())
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+
+rawtrial<- read.csv("~/Desktop/Uni/project/data/trials_data_deidentified(in).csv")
+rawsurvey <- read.csv("~/Desktop/Uni/project/data/survey_item_data.csv")
+rawdemo <- read.csv("~/Desktop/Uni/project/data/demographics_data.csv")
+# survey and trial
+```
+
+## 1) Select Task variables we want
+
+Select the key variables: subject ID, practice vs main study, trial number, block, condition, participant response, correctness, and attention check indicator.
+
+how the variables are recorded - make usre ot understand the datasets, how it is formatted 
+when using visual studio code, check the ai generated code
+
+each Ps will have thier worry group - look at that 
+
+survey: basic demographics - sex age income education 
+```{r select-variables}
+
+# Select key trial variables
+selected_trial <- rawtrial %>%
+  select(
+    subject_id = subID,                    # Subject ID
+    uid = uid,                             # Unique ID
+    session_id = sessionID,                # Practice vs main study identifier
+    trial_number = trial_number,           # Trial number
+    block = block_number,                  # Block number
+    condition = condition,                 # Condition (target present/absent)
+    task = task,                           # Task (practice vs actual)
+    response = response,                   # Participant response
+    correct = correct,                     # Correctness (1 = correct, 0 = incorrect)
+    is_attention_check = is_attention_check, # Attention check indicator
+    rt = rt,                               # Reaction time (useful for later analysis)
+    worry_group = worryGroup               # Worry group classification
+  )
+
+# Display first few rows to verify selection
+head(selected_trial)
+
+# Summary of selected data
+dim(selected_trial)
+str(selected_trial)
+
+# Select key survey variables
+selected_survey <- rawsurvey %>%
+  select(
+    subject_id = participant_id,                    # Subject ID
+    session_id = sessionID,                # Practice vs main study identifier
+    survey_name = survey_name,             # Survey name/type
+    question_name = question_name,         # Question identifier
+    question_number = question_number,     # Question number in survey
+    question_prompt = question_prompt,     # Full question text
+    response = response,                   # Participant response
+    response_label = response_label,       # Labeled response (e.g., "Strongly Agree")
+    is_inattention_check = is_inattention_check, # Inattention check indicator
+    worry_group = worryGroup,              # Worry group classification
+    wdq_score = wdqScore,                  # Worry/Depression questionnaire score
+    worry_cutoff = wdqCutoffUsed           # Whether worry cutoff was used
+  )
+
+# Display first few rows to verify selection
+head(selected_survey)
+
+# Summary of selected survey data
+dim(selected_survey)
+str(selected_survey)
+
+```
+
+## 2) Participant counts and trials per participant
+
+Report how many unique participants are in the dataset and how many trials each participant completed.
+
+make sure no missing data
+general stats 
+
+- condition count 
+- exclude the practice tasks 
+```{r participant-counts}
+# Check for missing data in selected trial variables
+missing_data <- selected_trial %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_count")
+
+cat("Missing data summary: \n")
+print(missing_data)
+
+# Count unique participants
+n_participants <- selected_trial %>%
+  distinct(subject_id) %>%
+  nrow()
+
+cat("Total unique participants:", n_participants, "\n\n")
+
+
+# Trials per participant
+trials_per_participant <- selected_trial %>%
+  group_by(subject_id) %>%
+  summarise(
+    n_trials = n(),
+    n_blocks = n_distinct(block),
+    n_conditions = n_distinct(condition),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_trials))
+
+cat("Trials per participant summary:\n")
+print(summary(trials_per_participant$n_trials))
+
+cat("Trials per participant (first 10):\n")
+print(head(trials_per_participant, 10))
+
+# Overall statistics
+cat("Overall dataset statistics:\n")
+cat("Total trials:", nrow(selected_trial), "\n")
+cat("Mean trials per participant:", round(mean(trials_per_participant$n_trials), 2), "\n")
+cat("Min trials per participant:", min(trials_per_participant$n_trials), "\n")
+cat("Max trials per participant:", max(trials_per_participant$n_trials), "\n")
+cat("Median trials per participant:", median(trials_per_participant$n_trials), "\n")
+
+```
+
+## 3) Attention check trials: counts and performance
+
+Describe how many attention-check trials are present and whether participants got them all correct.
+accuract in passing attention - if did not pass then remove them 
+```{r attention-checks}
+# Filter attention check trials
+attention_check_trials <- selected_trial %>%
+  filter(is_attention_check == 1)
+
+print("Attention Check Trials Summary:\n")
+cat("Total attention check trials:", nrow(attention_check_trials), "\n")
+cat("Unique participants with attention checks:", 
+    n_distinct(attention_check_trials$subject_id), "\n\n")
+
+# Performance on attention checks by participant
+attention_check_performance <- attention_check_trials %>%
+  group_by(subject_id) %>%
+  summarise(
+    n_attention_checks = n(),
+    n_correct = sum(correct, na.rm = TRUE),
+    accuracy = sum(correct, na.rm = TRUE) / n(),
+    all_correct = all(correct == 1, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(accuracy)
+
+cat("Attention check accuracy by participant:\n")
+print(attention_check_performance)
+cat("\n")
+
+# Summary statistics
+cat("Attention check accuracy statistics:\n")
+print(summary(attention_check_performance$accuracy))
+cat("\n")
+
+attention_check_performance <- attention_check_performance %>%
+  left_join(
+    selected_trial %>% select(subject_id, worry_group) %>% distinct(),
+    by = "subject_id"
+  )
+
+# Plot attention check trial accuracy
+ggplot(attention_check_performance, aes(x = worry_group, y = accuracy, fill = worry_group, colour = worry_group)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +
+  geom_jitter(width = 0.1, alpha = 0.7, size = 2) +
+  scale_fill_manual(values = c("high" = "#d9534f", "low" = "#5b9bd5")) +
+  scale_colour_manual(values = c("high" = "#d9534f", "low" = "#5b9bd5")) +
+  labs(
+    title = "Accuracy on Attention Check Trials",
+    x = "Worry Group",
+    y = "Mean Accuracy",
+    fill = "Worry Group",
+    colour = "Worry Group"
+  ) +
+  theme_minimal()
+
+# Identify participants who did NOT pass all attention checks
+failed_attention <- attention_check_performance %>%
+  filter(accuracy < 0.7)
+
+cat("Number of participants who FAILED attention checks:", nrow(failed_attention), "\n")
+if (nrow(failed_attention) > 0) {
+  cat("Participants who failed attention checks:\n")
+  print(failed_attention)
+  cat("\n")
+}
+
+# Create cleaned dataset excluding participants who failed attention checks
+participants_to_keep <- attention_check_performance %>%
+  filter(accuracy > 0.7) %>%
+  pull(subject_id)
+
+selected_trial_clean <- selected_trial %>%
+  filter(subject_id %in% participants_to_keep)
+
+cat("Dataset after removing participants who failed attention checks:\n")
+cat("Participants remaining:", n_distinct(selected_trial_clean$subject_id), "\n")
+cat("Trials remaining:", nrow(selected_trial_clean), "\n")
+cat("Trials removed:", nrow(selected_trial) - nrow(selected_trial_clean), "\n")
+
+
+# Filter to only main task trials (exclude practice)
+main_trials <- selected_trial_clean %>%
+  filter(task == "visual_search", !is.na(condition)) %>%
+  mutate(
+    choice = case_when(
+      condition == "condition_A" & response == "j" ~ "present",
+      condition == "condition_A" & response == "f" ~ "absent",
+      condition == "condition_B" & response == "f" ~ "present",
+      condition == "condition_B" & response == "j" ~ "absent",
+      TRUE ~ NA_character_
+    ),
+    acc = as.integer(correct == TRUE | correct == "True"),
+    acc_factor = factor(ifelse(correct == TRUE | correct == "True", "Correct", "Incorrect"),
+                        levels = c("Incorrect", "Correct")))
+```
+
+
+## 4) Per-participant accuracy and average reaction time
+
+For each participant, create a table showing average accuracy and average reaction time.
+- find average before cleaning
+
+**Suggested accuracy cutoff:** A typical cutoff is 60% (0.60) to exclude low-performing participants, though 70% is also common depending on task difficulty.
+
+```{r per-participant-summary}
+# Calculate per-participant accuracy and RT (using cleaned data without failed attention checks)
+# Exclude attention check trials from analysis
+
+per_participant_summary <- main_trials %>%
+  group_by(subject_id, worry_group, condition) %>%
+  summarise(
+    n_trials = n(),
+    accuracy = mean(correct, na.rm = TRUE),
+    mean_rt = mean(rt, na.rm = TRUE),
+    sd_rt = sd(rt, na.rm = TRUE),
+    min_rt = min(rt, na.rm = TRUE),
+    max_rt = max(rt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(accuracy))
+
+cat("Per-participant accuracy and reaction time summary:\n")
+print(per_participant_summary)
+cat("\n")
+
+# Summary statistics
+cat("Accuracy statistics across participants:\n")
+print(summary(per_participant_summary$accuracy))
+cat("\n")
+
+cat("Mean RT statistics across participants:\n")
+print(summary(per_participant_summary$mean_rt))
+cat("\n")
+
+# Identify low performers (below cutoffs)
+low_performers_60 <- per_participant_summary %>%
+  filter(accuracy < 0.60)
+
+low_performers_70 <- per_participant_summary %>%
+  filter(accuracy < 0.70)
+
+cat("Number of participants below 60% accuracy:", nrow(low_performers_60), "\n")
+if (nrow(low_performers_60) > 0) {
+  cat("Participants below 60% accuracy:\n")
+  print(low_performers_60)
+  cat("\n")
+}
+
+cat("Number of participants below 70% accuracy:", nrow(low_performers_70), "\n")
+if (nrow(low_performers_70) > 0) {
+  cat("Participants below 70% accuracy:\n")
+  print(low_performers_70)
+  cat("\n")
+}
+
+# Histogram of accuracy
+hist(per_participant_summary$accuracy, 
+     main = "Distribution of Per-Participant Accuracy",
+     xlab = "Accuracy",
+     ylab = "Frequency",
+     breaks = 20,
+     col = "steelblue",
+     border = "black")
+abline(v = 0.60, col = "red", lty = 2, lwd = 2, label = "60% cutoff")
+abline(v = 0.70, col = "orange", lty = 2, lwd = 2, label = "70% cutoff")
+legend("topleft", legend = c("60% cutoff", "70% cutoff"), 
+       col = c("red", "orange"), lty = 2)
+
+ggplot(per_participant_summary, aes(x = condition, y = accuracy, 
+                                    group = subject_id, colour = worry_group)) +
+  geom_point(alpha = 0.7) +
+  geom_line(alpha = 0.4) +
+  scale_colour_manual(values = c("high" = "#d9534f", "low" = "#5b9bd5")) +
+  labs(
+    title = "Accuracy by Condition for Each Participant",
+    x = "Condition",
+    y = "Mean Accuracy",
+    colour = "Worry Group"
+  ) +
+  theme_minimal()
+
+# remove outliers
+main_trials_clean <- main_trials %>%
+  anti_join(low_performers_70, by = "subject_id")
+
+# Histogram of mean reaction times -> convert ms to s
+hist(per_participant_summary$mean_rt / 1000,      
+     main = "Distribution of Per-Participant Mean Reaction Time",
+     xlab = "Mean RT (s)",                        
+     ylab = "Frequency",
+     breaks = 20,
+     col = "lightcoral",
+     border = "black",
+     xlim = c(0.8, 2.55))
+
+
+# Calculate per-participant RT mean and SD for trial-level outlier removal
+rt_per_participant <- main_trials %>%
+  group_by(subject_id) %>%
+  summarise(
+    mean_rt = mean(rt, na.rm = TRUE),
+    sd_rt   = sd(rt, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Join back to trial data and flag outlier *trials* (±2.5 or ±3 SD is common)
+main_trials_clean <- main_trials %>%
+  left_join(rt_per_participant, by = "subject_id") %>%
+  filter(
+    rt >= (mean_rt - 2.5 * sd_rt),
+    rt <= (mean_rt + 2.5 * sd_rt)
+  ) %>%
+  select(-mean_rt, -sd_rt)  # drop helper columns
+
+# Distribution of all trial RTs (converted ms → s)
+hist(main_trials_clean$rt / 1000,                       
+     main = "Distribution of Participant Reaction Time",
+     xlab = "RT (s)",                              
+     ylab = "Frequency",
+     breaks = 20,
+     col = "lightcoral",
+     border = "black")
+
+
+
+
+```
+## 5) Consolidate All Excluded Participants
+
+Combine all excluded participants from different criteria into one dataset for easy filtering of demographics using subject ID.
+
+```{r excluded-participants-consolidation}
+# Initialize a list to track excluded participants and reasons
+excluded_list <- list()
+
+# 1. Participants who failed attention checks (accuracy < 0.7)
+failed_attention_ids <- attention_check_performance %>%
+  filter(accuracy <= 0.7) %>%
+  mutate(exclusion_reason = "Failed attention checks") %>%
+  left_join(selected_trial %>% select(subject_id, uid) %>% distinct(), by = "subject_id") %>%
+  select(subject_id, uid, exclusion_reason, accuracy_on_attention_checks = accuracy, worry_group)
+
+if (nrow(failed_attention_ids) > 0) {
+  excluded_list[[1]] <- failed_attention_ids
+  cat("Excluded for failed attention checks:", nrow(failed_attention_ids), "\n")
+}
+
+# 2. Participants with low overall accuracy (< 70%)
+low_performers_ids <- per_participant_summary %>%
+  filter(accuracy < 0.70) %>%
+  group_by(subject_id) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(exclusion_reason = "Low task accuracy (<70%)") %>%
+  left_join(selected_trial %>% select(subject_id, uid) %>% distinct(), by = "subject_id") %>%
+  select(subject_id, uid, exclusion_reason, mean_accuracy = accuracy, worry_group)
+
+if (nrow(low_performers_ids) > 0) {
+  excluded_list[[2]] <- low_performers_ids
+  cat("Excluded for low accuracy:", nrow(low_performers_ids), "\n")
+}
+
+# Combine all exclusions into one dataset
+excluded_participants <- bind_rows(excluded_list) %>%
+  distinct(subject_id, .keep_all = TRUE) %>%
+  arrange(subject_id)
+
+# Create dataset of INCLUDED participants (for demographics filtering)
+all_unique_participants <- selected_trial %>%
+  distinct(subject_id, worry_group)
+
+included_participants <- all_unique_participants %>%
+  anti_join(excluded_participants, by = "subject_id")
+
+cat("\n=== INCLUDED PARTICIPANTS ===\n")
+cat("Total included participants:", n_distinct(included_participants$subject_id), "\n")
+cat("Breakdown by worry group:\n")
+print(table(included_participants$worry_group))
+
+```
+
+## 5.2) Attention check trials: survey & Demographics Filtering
+
+```{r filter-demographics}
+# Filter demographics data by:
+# 1. Excluding participants from excluded_participants dataset
+# 2. Including only participants with specified demographic criteria
+demographics_filtered <- rawdemo %>%
+  anti_join(excluded_participants, by = c("participant_id" = "uid")) %>%
+  filter(
+    dyslexia == "no",
+    color_blindness == "no",
+    fluent_english == "yes",
+    vision %in% c("normal_vision", "corrected_to_normal_vision")
+  )
+
+# Summary of filtered demographics
+cat("Demographics filtering summary:\n")
+cat("Original participants in demographics:", n_distinct(rawdemo$participant_id), "\n")
+cat("After excluding flagged participants:", 
+    n_distinct(rawdemo %>% anti_join(excluded_participants, by = c("participant_id" = "uid")) %>% pull(participant_id)), "\n")
+cat("Final after demographic criteria:", n_distinct(demographics_filtered$participant_id), "\n")
+
+# Show what was excluded by demographic criteria
+exclusions_summary <- rawdemo %>%
+  anti_join(demographics_filtered, by = "participant_id") %>%
+  summarise(
+    total_excluded = n_distinct(participant_id),
+    failed_dyslexia_filter = sum(dyslexia != "no", na.rm = TRUE),
+    failed_colorblindness_filter = sum(color_blindness != "no", na.rm = TRUE),
+    failed_english_filter = sum(fluent_english != "yes", na.rm = TRUE),
+    failed_vision_filter = sum(!vision %in% c("normal_vision", "corrected_to_normal_vision"), na.rm = TRUE)
+  )
+
+# --- INCOME COMPLETENESS FILTER ---
+# Identify participants with missing income before filtering
+income_incomplete_ids <- demographics_filtered %>%
+  filter(is.na(income)) %>%
+  pull(participant_id)
+
+cat("\nIncome completeness filter:\n")
+cat("Participants missing income:", length(income_incomplete_ids), "\n")
+
+# Exclude income-incomplete cases from demographics
+demographics_filtered <- demographics_filtered %>%
+  filter(!is.na(income))
+
+cat("After excluding incomplete income:", n_distinct(demographics_filtered$participant_id), "\n")
+
+# Propagate income exclusion to trial data
+main_trials_clean <- main_trials_clean %>%
+  filter(!uid %in% income_incomplete_ids)
+
+# Filter out attention check items from survey data
+selected_survey_clean <- selected_survey %>%
+  filter(is_inattention_check == 0 | is.na(is_inattention_check))
+
+cat("\nSurvey rows before filtering attention checks:", nrow(selected_survey), "\n")
+cat("Survey rows after filtering attention checks:", nrow(selected_survey_clean), "\n")
+cat("Attention check rows removed:", nrow(selected_survey) - nrow(selected_survey_clean), "\n")
+
+# Identify subjects who FAILED survey attention checks
+failed_survey_attn_ids <- selected_survey %>%
+  filter(is_inattention_check == 1) %>%
+  distinct(subject_id, worry_group) %>%
+  mutate(
+    exclusion_reason = "Failed survey attention check",
+    subject_id = as.integer(subject_id)
+  )
+
+cat("\n=== SURVEY ATTENTION CHECK FAILURES ===\n")
+cat("Subjects failed survey attention check:", nrow(failed_survey_attn_ids), "\n")
+if (nrow(failed_survey_attn_ids) > 0) print(failed_survey_attn_ids)
+
+# Add to the master excluded_participants list
+excluded_participants <- bind_rows(
+  excluded_participants,
+  failed_survey_attn_ids %>%
+    left_join(selected_trial %>% select(subject_id, uid) %>% distinct(), by = "subject_id")
+) %>%
+  distinct(subject_id, .keep_all = TRUE)
+
+# Remove failed subjects from main_trials_clean and selected_survey_clean
+main_trials_clean <- main_trials_clean %>%
+  filter(!subject_id %in% failed_survey_attn_ids$subject_id)
+
+selected_survey_clean <- selected_survey_clean %>%
+  filter(!subject_id %in% failed_survey_attn_ids$subject_id)
+
+cat("\n=== FINAL CLEAN DATASET AFTER SURVEY ATTENTION CHECK EXCLUSIONS ===\n")
+cat("Participants remaining:", n_distinct(main_trials_clean$subject_id), "\n")
+cat("Trials remaining:", nrow(main_trials_clean), "\n")
+cat("Breakdown by worry group:\n")
+print(table(distinct(main_trials_clean, subject_id, worry_group)$worry_group))
+
+# 3. Participants with inconsistent WDQ worry group classification (pre vs post)
+wdq_totals <- read.csv("data/wdq_totals_thesis.csv")
+
+wdq_group_changers <- wdq_totals %>%
+  filter(
+    (worryGroup == "high" & wdq_post_total < 28) |
+    (worryGroup == "low"  & wdq_post_total >= 28)
+  )
+
+cat("Participants excluded for WDQ group change:", nrow(wdq_group_changers), "\n")
+print(wdq_group_changers)
+```
+
+## 5.3) Identify Participants Removed During Trial Cleaning
+
+Compare original trial data with cleaned trial data to identify and document which participants were removed through the cleaning pipeline.
+
+```{r removed-during-cleaning}
+# All exclusions across demographics, survey, and trials
+all_exclusions <- bind_rows(
+  
+  # 1. Failed trial attention checks
+  failed_attention_ids %>%
+    select(subject_id, uid, worry_group, exclusion_reason),
+  
+  # 2. Low task accuracy
+  low_performers_ids %>%
+    select(subject_id, uid, worry_group, exclusion_reason),
+  
+  # 3. Failed survey attention check
+  failed_survey_attn_ids %>%
+    left_join(selected_trial %>% select(subject_id, uid) %>% distinct(), by = "subject_id") %>%
+    select(subject_id, uid, worry_group, exclusion_reason),
+  
+  # 4. Failed demographic criteria
+  rawdemo %>%
+    filter(
+      dyslexia != "no" |
+      color_blindness != "no" |
+      fluent_english != "yes" |
+      !vision %in% c("normal_vision", "corrected_to_normal_vision")
+    ) %>%
+    left_join(selected_trial %>% select(subject_id, uid, worry_group) %>% distinct(), 
+              by = c("participant_id" = "uid")) %>%
+    mutate(exclusion_reason = "Failed demographic criteria") %>%
+    select(subject_id, uid = participant_id, worry_group, exclusion_reason),
+  
+  # 5. Incomplete income data
+  rawdemo %>%
+    filter(participant_id %in% income_incomplete_ids) %>%
+    left_join(selected_trial %>% select(subject_id, uid, worry_group) %>% distinct(),
+              by = c("participant_id" = "uid")) %>%
+    mutate(exclusion_reason = "Incomplete income data") %>%
+    select(subject_id, uid = participant_id, worry_group, exclusion_reason),
+  
+  # 6. WDQ worry group changed at retest
+  wdq_group_changers %>%
+    left_join(selected_trial %>% select(subject_id, uid, worry_group) %>% distinct(),
+              by = c("participant_id" = "uid")) %>%
+    mutate(exclusion_reason = "WDQ worry group changed at retest") %>%
+    select(subject_id, uid = participant_id, worry_group, exclusion_reason)
+  
+) %>%
+  distinct(subject_id, .keep_all = TRUE) %>%
+  arrange(subject_id)
+
+cat("=== EXCLUSION LIST ===\n")
+cat("Total unique excluded participants:", n_distinct(all_exclusions$subject_id), "\n\n")
+cat("By reason:\n")
+print(table(all_exclusions$exclusion_reason))
+cat("\nBy worry group:\n")
+print(table(all_exclusions$worry_group))
+cat("\nFull list:\n")
+print(all_exclusions)
+
+main_trials_clean <- main_trials_clean %>%
+  filter(!subject_id %in% all_exclusions$subject_id)
+
+cat("Participants remaining:", n_distinct(main_trials_clean$subject_id), "\n")
+cat("Trials remaining:", nrow(main_trials_clean), "\n")
+```
+
+## 6) Demographics Summary: Age, WDQ Score, and Education Level
+
+Display distributions and summary statistics for key demographic variables in the filtered dataset.
+
+```{r demographics-distributions}
+demographics_filtered <- rawdemo %>%
+  filter(participant_id %in% main_trials_clean$uid)
+
+cat("=== DEMOGRAPHICS DISTRIBUTIONS FOR FILTERED SAMPLE ===\n\n")
+
+# Summary statistics for age
+cat("AGE Distribution:\n")
+cat("N:", n_distinct(demographics_filtered$participant_id), "\n")
+print(summary(demographics_filtered$age))
+cat("SD:", sd(demographics_filtered$age, na.rm = TRUE), "\n\n")
+
+# Summary statistics for WDQ score
+cat("WDQ Score Distribution:\n")
+print(summary(demographics_filtered$wdqScore))
+cat("SD:", sd(demographics_filtered$wdqScore, na.rm = TRUE), "\n\n")
+
+# Summary statistics for education level
+cat("EDUCATION Level Distribution:\n")
+print(table(demographics_filtered$education, useNA = "ifany"))
+cat("\n")
+
+# Histograms for age and WDQ score
+par(mfrow = c(1, 2))
+
+hist(demographics_filtered$age,
+     main = "Distribution of Age",
+     xlab = "Age (years)",
+     ylab = "Frequency",
+     col = "steelblue",
+     border = "black",
+     breaks = 10)
+
+hist(demographics_filtered$wdqScore,
+     main = "Distribution of WDQ Score",
+     xlab = "WDQ Score",
+     ylab = "Frequency",
+     col = "lightcoral",
+     border = "black",
+     breaks = 10)
+
+par(mfrow = c(1, 1))
+
+# Bar plot for education level
+education_counts <- demographics_filtered %>%
+  group_by(education) %>%
+  summarise(n = n_distinct(participant_id), .groups = "drop") %>%
+  arrange(desc(n))
+
+barplot(education_counts$n,
+        names.arg = education_counts$education,
+        main = "Distribution of Education Level",
+        xlab = "Education Level",
+        ylab = "Frequency",
+        col = "lightgreen",
+        border = "black")
+
+# Display counts
+print(education_counts)
+```
+
+## 7) WDQ Score by Worry Group
+
+Compare WDQ scores between high and low worry groups with descriptive statistics and independent samples t-test.
+
+```{r wdq-by-worry-group}
+# Get worry group from the trial data to match with demographics
+demographics_with_worry <- demographics_filtered %>%
+  left_join(
+    selected_trial %>% select(subject_id, uid, worry_group) %>% distinct(),
+    by = c("participant_id" = "uid")
+  )
+
+# Summary statistics for WDQ scores by worry group
+wdq_by_group <- demographics_with_worry %>%
+  filter(!is.na(worry_group), !is.na(wdqScore)) %>%
+  group_by(worry_group) %>%
+  summarise(
+    n = n(),
+    mean_wdq = mean(wdqScore, na.rm = TRUE),
+    sd_wdq = sd(wdqScore, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("=== WDQ SCORE BY WORRY GROUP ===\n")
+print(wdq_by_group)
+cat("\n")
+
+# Extract data for each group
+high_worry_wdq <- demographics_with_worry %>%
+  filter(worry_group == "high", !is.na(wdqScore)) %>%
+  pull(wdqScore)
+
+low_worry_wdq <- demographics_with_worry %>%
+  filter(worry_group == "low", !is.na(wdqScore)) %>%
+  pull(wdqScore)
+
+# Perform independent samples t-test
+t_test_result <- t.test(high_worry_wdq, low_worry_wdq)
+
+cat("INDEPENDENT SAMPLES T-TEST:\n")
+cat("High Worry Group: M = ", round(mean(high_worry_wdq, na.rm = TRUE), 2), 
+    ", SD = ", round(sd(high_worry_wdq, na.rm = TRUE), 2), "\n", sep = "")
+cat("Low Worry Group: M = ", round(mean(low_worry_wdq, na.rm = TRUE), 2), 
+    ", SD = ", round(sd(low_worry_wdq, na.rm = TRUE), 2), "\n\n", sep = "")
+cat("t(", round(t_test_result$parameter, 2), ") = ", round(t_test_result$statistic, 3), 
+    ", p = ", round(t_test_result$p.value, 7), "\n", sep = "")
+cat("\n")
+```
+
+## 8) Group-level accuracy by condition (present vs absent) - Table
+
+Create a table showing mean accuracy for each condition.
+
+ 
+```{r group-accuracy-table}
+
+main_trials_clean %>%
+  group_by(condition) %>%
+  summarise(n = n()) %>%
+  print()
+
+mean_accuracy <- main_trials_clean %>%
+  group_by(condition, worry_group) %>%
+  summarise(
+    mean_accuracy = mean(acc, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    condition = factor(
+      condition,
+      levels = c("target_absent", "target_present"),
+      labels = c("Target Absent", "Target Present")
+    )
+  )
+
+print(mean_accuracy)
+```
+
+## 8.2) Group-level accuracy by condition - Plot
+
+Plot showing accuracy for target present vs absent conditions.
+plot the error rates
+
+```{r plot-accuracy-by-condition, fig.width=6, fig.height=4}
+mean_accuracy <- main_trials_clean %>%
+  group_by(condition, worry_group) %>%
+  summarise(
+    mean_accuracy = mean(acc, na.rm = TRUE),
+    sd_accuracy = sd(acc, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    se_accuracy = sd_accuracy / sqrt(n),
+    condition = factor(
+      condition,
+      levels = c("target_absent", "target_present"),
+      labels = c("Target Absent", "Target Present")
+    )
+  )
+
+participant_acc <- main_trials_clean %>%
+  group_by(subject_id, condition, worry_group) %>%
+  summarise(mean_accuracy = mean(acc, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    condition = factor(
+      condition,
+      levels = c("target_absent", "target_present"),
+      labels = c("Target Absent", "Target Present")
+    )
+  )
+
+
+ggplot(mean_accuracy, aes(x = condition, y = mean_accuracy, fill = worry_group)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6, alpha = 0.7) +
+  geom_jitter(
+    data = participant_acc,
+    aes(y = mean_accuracy, colour = worry_group),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7),
+    size = 2, alpha = 0.7
+  ) +
+  geom_errorbar(
+    aes(ymin = mean_accuracy - se_accuracy, ymax = mean_accuracy + se_accuracy),
+    position = position_dodge(width = 0.7),
+    width = 0.4, linewidth = 0.8
+  ) +
+  coord_cartesian(ylim = c(0.6, 1.0)) +  
+  scale_fill_manual(values = c("high" = "#E08080", "low" = "#80B0D0")) +
+  scale_colour_manual(values = c("high" = "#C05050", "low" = "#5090B0")) +
+  labs(
+    title = "Accuracy by Condition and Worry Group",
+    x = "Condition",
+    y = "Mean Accuracy",
+    fill = "Worry Group",
+    colour = "Worry Group"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+```
+
+## 9) Group-level reaction time by condition - Table
+
+Create a table summarising mean RT by condition. Consider excluding incorrect trials or extreme RTs.
+
+```{r group-rt-table}
+mean_rt <- main_trials_clean %>%
+  group_by(condition, worry_group) %>%
+  summarise(
+    mean_rt = mean(rt, na.rm = TRUE)/1000,
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    condition = factor(
+      condition,
+      levels = c("target_absent", "target_present"),
+      labels = c("Target Absent", "Target Present")
+    )
+  )
+
+print(mean_rt)
+
+
+```
+
+## 9.2) Group-level reaction time by condition - Plot
+
+Plot mean RT by condition with error bars.
+
+```{r plot-rt-by-condition, fig.width=6, fig.height=4}
+mean_rt <- main_trials_clean %>%
+  group_by(condition,worry_group) %>%
+  summarise(
+     mean_rt = mean(rt, na.rm = TRUE) / 1000,
+    sd_rt = sd(rt, na.rm = TRUE) / 1000,
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    se_rt = sd_rt / sqrt(n),
+    condition = factor(
+      condition,
+      levels = c("target_absent", "target_present"),
+      labels = c("Target Absent", "Target Present")
+    )
+  )
+
+participant_rt <- main_trials_clean %>%
+  group_by(subject_id, condition, worry_group) %>%
+  summarise(mean_rt = mean(rt, na.rm = TRUE) / 1000, .groups = "drop") %>%
+  mutate(
+    condition = factor(
+      condition,
+      levels = c("target_absent", "target_present"),
+      labels = c("Target Absent", "Target Present")
+    )
+  )
+
+# Plot -- add error bars and subject means
+ggplot(mean_rt, aes(x = condition, y = mean_rt, fill = worry_group)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean_rt - se_rt, ymax = mean_rt + se_rt),
+    width = 0.4,
+    position = position_dodge(0.9)
+  ) +
+  geom_point(
+    data = participant_rt,
+    aes(x = condition, y = mean_rt, colour = worry_group),
+    position = position_dodge(0.9),
+    alpha = 0.5,
+    size = 1.5
+  ) +
+  scale_fill_manual(values = c("high" = "#d9534f", "low" = "#5b9bd5")) +
+  scale_colour_manual(values = c("high" = "#d9534f", "low" = "#5b9bd5")) +
+  coord_cartesian(ylim = c(0, max(mean_rt$mean_rt) * 1.1)) +
+  labs(
+    title = "RT by Condition and Worry Group",
+    x = "Condition",
+    y = "Mean RT (s)",
+    fill = "Worry Group"
+  ) +
+  guides(colour = "none") +
+  theme_minimal()
+```
+
+## 10) Mixed Effects Logistic Regression Model for Accuracy
+
+Fit mixed-effects logistic regression models with random intercept and slope for condition per participant.
+
+```{r mixed-effects-setup, include=FALSE}
+# Install packages if needed
+if (!require("lme4")) install.packages("lme4")
+if (!require("sjPlot")) install.packages("sjPlot")
+if (!require("sjmisc")) install.packages("sjmisc")
+
+library(lme4)
+library(sjPlot)
+library(sjmisc)
+```
+
+```{r prepare-data-for-lme}
+# Prepare data for mixed effects model
+# Join main_trials_clean with demographics_filtered to get demographic variables
+
+lme_data <- main_trials_clean %>%
+  left_join(
+    demographics_filtered %>% select(participant_id, sex, age, education, income, wdqScore),
+    by = c("uid" = "participant_id")
+  ) %>%
+  # Create scaled/centered variables
+  mutate(
+    # Scale trial number (z-score)
+    trial_number_scaled = scale(trial_number)[,1],
+    
+    # Scale and center age
+    age_z = scale(age)[,1],
+    
+    # Create previous trial condition (shift condition by 1 within each participant)
+    prev_trial_condition = NA_character_,
+    
+    # Mean center condition (target_absent = -0.5, target_present = 0.5)
+    condition_centered = ifelse(condition == "target_absent", -0.5, 0.5),
+    
+    # Mean center worry group (high = -0.5, low = 0.5)
+    worry_group_centered = ifelse(worry_group == "high", -0.5, 0.5),
+    
+    # Ensure outcome variable is binary
+    acc_binary = as.numeric(acc)
+  ) %>%
+  # Add previous trial condition
+  group_by(subject_id) %>%
+  mutate(prev_trial_condition = lag(condition)) %>%
+  ungroup() %>%
+  # Remove first trial for each participant (no previous trial)
+  filter(!is.na(prev_trial_condition)) %>%
+  # Convert factor variables as needed (keep education and income as numeric)
+  mutate(
+    condition = factor(condition, levels = c("target_absent", "target_present")),
+    worry_group = factor(worry_group, levels = c("high", "low")),
+    sex = factor(sex),
+    prev_trial_condition = factor(prev_trial_condition, levels = c("target_absent", "target_present"))
+  )
+
+cat("Data prepared for mixed effects model:\n")
+cat("N trials:", nrow(lme_data), "\n")
+cat("N unique participants:", n_distinct(lme_data$subject_id), "\n")
+cat("Check for missing data:\n")
+print(colSums(is.na(lme_data[, c("acc_binary", "condition", "worry_group", "block", "trial_number_scaled", 
+                                   "prev_trial_condition", "sex", "age_z", "education", "income")])))
+```
+
+```{r fit-lme-models}
+# Filter to income-complete cases first
+lme_data_income_complete <- lme_data %>% filter(!is.na(income))
+
+# Base model on income-complete data
+lme_accuracy_base <- glmer(
+  acc_binary ~ condition * worry_group + block + trial_number_scaled +
+    prev_trial_condition + sex + age_z + education +
+    (1 + condition | subject_id),
+  data = lme_data_income_complete,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e4))
+)
+
+print(summary(lme_accuracy_base))
+
+# Full model on same data
+lme_accuracy_full <- glmer(
+  acc_binary ~ condition * worry_group + block + trial_number_scaled +
+    prev_trial_condition + sex + age_z + education + income +
+    (1 + condition | subject_id),
+  data = lme_data_income_complete,
+  family = binomial(link = "logit"),
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e4))
+)
+
+print(summary(lme_accuracy_full))
+
+# Now anova() will work
+cat("\n=== MODEL COMPARISON ===\n")
+model_comparison <- anova(lme_accuracy_base, lme_accuracy_full)
+print(model_comparison)
+```
+
+```{r lme-model-table}
+# Display models in formatted table
+tab_model(
+  lme_accuracy_base,
+  lme_accuracy_full,
+  dv.labels = c("Accuracy (Base Model)", "Accuracy (Full Model with Income)"),
+  show.stat = TRUE,
+  show.aic = TRUE,
+  show.loglik = TRUE,
+  pred.labels = list(
+    "Intercept",
+    "Condition (Target Present)",
+    "Worry Group (Low)",
+    "Block",
+    "Trial Number (Scaled)",
+    "Prev Trial Condition (Target Present)",
+    "Sex",
+    "Age (Z-scored)",
+    "Education",
+    "Income",
+    "Condition × Worry Group"
+  ),
+  title = "Mixed Effects Logistic Regression: Accuracy Prediction"
+)
+```
+
+```{r lme-diagnostics}
+# Extract random effects
+cat("=== RANDOM EFFECTS ===\n")
+cat("Base Model Random Effects:\n")
+print(ranef(lme_accuracy_base))
+
+# Plot random effects
+par(mfrow = c(1, 2))
+plot(ranef(lme_accuracy_base), main = "Base Model Random Effects")
+plot(ranef(lme_accuracy_full), main = "Full Model Random Effects")
+par(mfrow = c(1, 1))
+
+# Fixed effects summary
+cat("\n=== FIXED EFFECTS SUMMARY ===\n")
+cat("Base Model Fixed Effects:\n")
+print(fixef(lme_accuracy_base))
+
+cat("\nFull Model Fixed Effects:\n")
+print(fixef(lme_accuracy_full))
+```
+
+## 10.2) Mixed Effects Linear Regression Model for Reaction Time
+
+Fit mixed-effects linear regression models for RT with random intercept and slope for condition per participant.
+
+```{r prepare-data-for-lme-rt}
+# Prepare data for RT mixed effects model
+# Use the same lme_data but add RT variable
+
+class(lme_data$rt)
+str(lme_data$rt)
+head(lme_data$rt)
+lme_data %>%
+  select(rt) %>%
+  head()
+
+lme_data_rt <- lme_data %>%
+  left_join(
+    main_trials_clean %>% select(subject_id, trial_number, block, rt),
+    by = c("subject_id", "trial_number", "block")
+  )
+
+lme_rt <- lme_data %>%
+  mutate(
+    # Convert RT to seconds
+    rt_seconds = rt / 1000,
+    # Log-transform RT to normalize distribution
+    log_rt = log(rt_seconds),
+    # Scale log RT
+    log_rt_scaled = scale(log_rt)[,1],
+    # Keep education and income as numeric (not split into factor levels)
+    education = as.numeric(education),
+    income = as.numeric(income)
+  ) %>%
+  filter(!is.na(rt_seconds), !is.na(log_rt))
+
+cat("Data prepared for RT mixed effects model:\n")
+cat("N trials:", nrow(lme_rt), "\n")
+cat("N unique participants:", n_distinct(lme_rt$subject_id), "\n")
+cat("Mean RT (s):", round(mean(lme_rt$rt_seconds, na.rm = TRUE), 3), "\n")
+cat("SD RT (s):", round(sd(lme_rt$rt_seconds, na.rm = TRUE), 3), "\n")
+```
+
+```{r fit-lme-models-rt}
+# Base model: RT predicted by experimental factors (on log scale)
+
+lme_rt_base <- lmer(
+  log_rt ~ condition * worry_group + block + trial_number_scaled +
+    prev_trial_condition + sex + age_z + education +
+    (1 + condition | subject_id),
+  data = lme_rt
+)
+
+cat("Base RT model fitted successfully\n")
+print(summary(lme_rt_base))
+
+# Full model: includes income
+lme_rt_full <- lmer(
+  log_rt ~ condition * worry_group + block + trial_number_scaled +
+    prev_trial_condition + sex + age_z + education + income +
+    (1 + condition | subject_id),
+  data = lme_rt %>% filter(!is.na(income))
+)
+
+cat("\nFull RT model fitted successfully\n")
+print(summary(lme_rt_full))
+
+# Model comparison
+# Create a dataset with no NAs on any variable used in either model
+lme_rt_complete <- lme_rt %>%
+  filter(
+    !is.na(income),
+    !is.na(sex),
+    !is.na(age_z),
+    !is.na(education),
+    !is.na(log_rt_scaled)
+  )
+
+# Fit both models on the same dataset
+lme_rt_base <- lmer(log_rt_scaled ~ condition * worry_group + block + 
+                      trial_number_scaled + prev_trial_condition + 
+                      sex + age_z + education + (1 + condition | subject_id),
+                    data = lme_rt_complete)
+
+lme_rt_full <- lmer(log_rt_scaled ~ condition * worry_group + block + 
+                      trial_number_scaled + prev_trial_condition + 
+                      sex + age_z + education + income + (1 + condition | subject_id),
+                    data = lme_rt_complete)
+
+cat("\n=== MODEL COMPARISON ===\n")
+model_comparison_rt <- anova(lme_rt_base, lme_rt_full)
+print(model_comparison_rt)
+```
+
+```{r lme-model-table-rt}
+# Display RT models in formatted table
+tab_model(
+  lme_rt_base,
+  lme_rt_full,
+  dv.labels = c("RT - Base Model", "RT - Full Model with Income"),
+  show.stat = TRUE,
+  show.aic = TRUE,
+  show.loglik = TRUE,
+  pred.labels = list(
+    "Intercept (log RT)",
+    "Condition (Target Present)",
+    "Worry Group (Low)",
+    "Block",
+    "Trial Number (Scaled)",
+    "Prev Trial Condition (Target Present)",
+    "Sex",
+    "Age (Z-scored)",
+    "Education",
+    "Income",
+    "Condition × Worry Group"
+  ),
+  title = "Mixed Effects Linear Regression: Reaction Time Prediction (Log Scale)"
+)
+```
+
+```{r lme-diagnostics-rt}
+# Extract random effects
+cat("=== RANDOM EFFECTS FOR RT MODELS ===\n")
+cat("Base Model Random Effects:\n")
+print(ranef(lme_rt_base))
+
+# Plot random effects
+par(mfrow = c(1, 2))
+plot(ranef(lme_rt_base), main = "Base Model Random Effects (RT)")
+plot(ranef(lme_rt_full), main = "Full Model Random Effects (RT)")
+par(mfrow = c(1, 1))
+
+# Fixed effects summary
+cat("\n=== FIXED EFFECTS SUMMARY FOR RT ===\n")
+cat("Base Model Fixed Effects:\n")
+print(fixef(lme_rt_base))
+
+cat("\nFull Model Fixed Effects:\n")
+print(fixef(lme_rt_full))
+
+# Residual diagnostics
+cat("\n=== RESIDUAL DIAGNOSTICS ===\n")
+par(mfrow = c(2, 2))
+plot(lme_rt_base, main = "Base Model Residuals")
+qqnorm(residuals(lme_rt_base), main = "Q-Q Plot: Base Model")
+qqline(residuals(lme_rt_base))
+plot(lme_rt_full, main = "Full Model Residuals")
+qqnorm(residuals(lme_rt_full), main = "Q-Q Plot: Full Model")
+qqline(residuals(lme_rt_full))
+par(mfrow = c(1, 1))
+
+# Check for outliers
+cat("\nResiduals Summary (Base Model):\n")
+print(summary(residuals(lme_rt_base)))
+
+cat("\nResiduals Summary (Full Model):\n")
+print(summary(residuals(lme_rt_full)))
+```
+### 11) DDM m14 Analysis 
+```{r m14-main-effects}
+m14 <- read.csv("ddm/m14.csv", stringsAsFactors = FALSE)
+ 
+# Standardise column names (in case they differ slightly)
+names(m14) <- trimws(names(m14))
+names(m14) <- gsub("%", "", names(m14))          # HDI 3% -> HDI 3
+names(m14) <- gsub("\\s+", "_", names(m14))      # HDI 3 -> HDI_3
+names(m14) <- gsub("\\.", "_", names(m14))
+ 
+# Rename to standard internal names
+m14 <- m14 %>%
+  rename(
+    parameter = matches("(?i)param"),
+    mean      = matches("(?i)^mean$"),
+    sd        = matches("(?i)^sd$"),
+    hdi_lo    = matches("(?i)hdi_3"),
+    hdi_hi    = matches("(?i)hdi_97"),
+    ess       = matches("(?i)ess"),
+    rhat      = matches("(?i)rhat|r_hat")
+  ) %>%
+  mutate(
+    mean   = as.numeric(mean),
+    hdi_lo = as.numeric(hdi_lo),
+    hdi_hi = as.numeric(hdi_hi),
+    sig    = !(hdi_lo < 0 & hdi_hi > 0)   # HDI excludes zero?
+  )
+ 
+# ---- 1. Extract individual parameters ----------------------
+get_param <- function(name) {
+  m14 %>% filter(parameter == name) %>% pull(mean)
+}
+ 
+a_int  <- get_param("a_Intercept")
+a_tt   <- get_param("a_trialType")
+a_wg   <- get_param("a_worryGroup")
+a_int2 <- get_param("a_trialType:worryGroup")
+v_int  <- get_param("v_Intercept")
+v_tt   <- get_param("v_trialType")
+```
+
+```{r m14-cell-predictions}
+
+# Sum-coded contrasts:
+#   trialType  : -0.5 = Target Present, +0.5 = Target Absent
+#   worryGroup : -0.5 = Low Worry,      +0.5 = High Worry
+ 
+cells <- expand.grid(
+  trialType  = c(-0.5, 0.5),
+  worryGroup = c(-0.5, 0.5)
+) %>%
+  mutate(
+    a_pred      = a_int + a_tt * trialType + a_wg * worryGroup +
+                  a_int2 * trialType * worryGroup,
+    v_pred      = v_int + v_tt * trialType,
+    trial_label = ifelse(trialType  == -0.5, "Target Present", "Target Absent"),
+    worry_label = ifelse(worryGroup == -0.5, "Low Worry",      "High Worry")
+  )
+ 
+pal <- c("High Worry" = "#E07B39", "Low Worry" = "#4A90D9")
+```
+
+```{r m14-boundary-seperation}
+ 
+p_a <- ggplot(cells, aes(x = trial_label, y = a_pred,
+                          colour = worry_label, group = worry_label)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3.5) +
+  scale_colour_manual(values = pal) +
+  scale_x_discrete(limits = c("Target Present", "Target Absent")) +
+  labs(
+    title    = "Boundary Separation (a)",
+    subtitle = "Higher = more evidence required before responding",
+    x = NULL, y = "Predicted a (log scale)", colour = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title      = element_text(face = "bold"),
+        legend.position = "bottom",
+        panel.grid.minor = element_blank())
+
+print(p_a)
+```
+
+``` {r m14-drift-rate}
+p_v <- ggplot(cells, aes(x = trial_label, y = v_pred,
+                          colour = worry_label, group = worry_label)) +
+  geom_line(linewidth = 1.1, linetype = "dashed") +
+  geom_point(size = 3.5) +
+  scale_colour_manual(values = pal) +
+  scale_x_discrete(limits = c("Target Present", "Target Absent")) +
+  labs(
+    title    = "Drift Rate (v)",
+    subtitle = "No worry group effect — lines overlap by model design",
+    x = NULL, y = "Predicted v", colour = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title      = element_text(face = "bold"),
+        legend.position = "bottom",
+        panel.grid.minor = element_blank())
+
+print(p_v)
+```
+
+``` {r m14-forest-plot} 
+library(patchwork)
+
+forest_params <- m14 %>%
+  filter(parameter %in% c("v_trialType", "a_trialType",
+                           "a_worryGroup", "a_trialType:worryGroup")) %>%
+  mutate(
+    label = recode(parameter,
+      "v_trialType"            = "v: Trial Type",
+      "a_trialType"            = "a: Trial Type",
+      "a_worryGroup"           = "a: Worry Group",
+      "a_trialType:worryGroup" = "a: Trial Type \u00d7 Worry Group"
+    ),
+    hdi_label = paste0("[", round(hdi_lo, 3), ", ", round(hdi_hi, 3), "]")
+  )
+ 
+p_forest <- ggplot(forest_params,
+                   aes(x = mean, y = reorder(label, mean), colour = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(aes(xmin = hdi_lo, xmax = hdi_hi),
+                 height = 0.2, linewidth = 0.9) +
+  geom_point(size = 4) +
+  geom_text(aes(label = hdi_label),
+            hjust = 0,        # left-align from point
+            vjust = -0.8,     # lift above the point
+            size = 3,
+            colour = "grey30") +
+  scale_colour_manual(
+    values = c("TRUE" = "#2ECC71", "FALSE" = "#E74C3C"),
+    labels = c("TRUE" = "HDI excludes 0", "FALSE" = "HDI includes 0")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.2, 0.35))) +
+  labs(
+    title    = "Posterior Estimates: Group & Condition Effects",
+    subtitle = "Mean \u00b1 94% HDI   |   ELPD LOO = \u22122929.5",
+    x = "Posterior Mean (log-linear scale)", y = NULL, colour = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+print (p_forest)
+
+combined <- (p_a | p_v) / p_forest +
+  plot_annotation(
+    title   = "DDM Full Interaction Model \u2014 Posterior Summary",
+    caption = "Sum contrasts: Target Present = \u22120.5, Low Worry = \u22120.5.",
+    theme   = theme(plot.title = element_text(size = 15, face = "bold"))
+  )
+
+ggsave("ddm_posterior_plots.png", combined,
+       width = 14, height = 10, dpi = 180, bg = "white")
+
+print(combined)
+
+```
+### 12) DDM m5 Analysis 
+```{r m5-main-effects}
+m5 <- read.csv("ddm/m5.csv", stringsAsFactors = FALSE)
+ 
+# Standardise column names (in case they differ slightly)
+names(m5) <- trimws(names(m5))
+names(m5) <- gsub("%", "", names(m5))
+names(m5) <- gsub("\\s+", "_", names(m5))
+names(m5) <- gsub("\\.", "_", names(m5))
+# Rename by position -- avoids regex failing on special characters like R̂
+colnames(m5) <- c("parameter", "mean", "sd", "hdi_lo", "hdi_hi", "ess", "rhat")
+
+m5 <- m5 %>%
+  mutate(
+    mean   = as.numeric(mean),
+    hdi_lo = as.numeric(hdi_lo),
+    hdi_hi = as.numeric(hdi_hi),
+    sig    = !(hdi_lo < 0 & hdi_hi > 0)
+  )
+# ---- 1. Extract individual parameters ----------------------
+get_param <- function(name) {
+  m5 %>% filter(parameter == name) %>% pull(mean)
+}
+a_int <- get_param("a_Intercept")
+a_tt  <- get_param("a_trialType")
+v_int <- get_param("v_Intercept")
+v_tt  <- get_param("v_trialType")
+
+
+```
+
+```{r m5-cell-predictions}
+# M5 has trialType effects only -- no worryGroup parameter
+# Sum-coded contrast: trialType: -0.5 = Target Present, +0.5 = Target Absent
+
+cells <- data.frame(trialType = c(-0.5, 0.5)) %>%
+  mutate(
+    a_pred      = a_int + a_tt * trialType,
+    v_pred      = v_int + v_tt * trialType,
+    trial_label = ifelse(trialType == -0.5, "Target Present", "Target Absent")
+  )
+
+pal_trial <- c("Target Present" = "#4A90D9", "Target Absent" = "#E07B39")
+```
+
+```{r m5-boundary-seperation}
+ 
+p_a5 <- ggplot(cells, aes(x = trial_label, y = a_pred,
+                          colour = trial_label, group = 1)) +
+  geom_line(linewidth = 1.1, colour = "grey50") +
+  geom_point(size = 3.5, aes(colour = trial_label)) +
+  scale_colour_manual(values = pal_trial) +
+  scale_x_discrete(limits = c("Target Present", "Target Absent")) +
+  labs(
+    title    = "Boundary Separation (a)",
+    subtitle = "Higher = more evidence required before responding",
+    x = NULL, y = "Predicted a (log scale)", colour = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "none",
+        panel.grid.minor = element_blank())
+
+print(p_a5)
+```
+
+``` {r m5-drift-rate}
+p_v5 <- ggplot(cells, aes(x = trial_label, y = v_pred,
+                          colour = trial_label, group = 1)) +
+  geom_line(linewidth = 1.1, colour = "grey50") +
+  geom_point(size = 3.5, aes(colour = trial_label)) +
+  scale_colour_manual(values = pal_trial) +
+  scale_x_discrete(limits = c("Target Present", "Target Absent")) +
+  labs(
+    title    = "Drift Rate (v)",
+    subtitle = "Trial type effect only -- M5 contains no worry group parameter",
+    x = NULL, y = "Predicted v", colour = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "none",
+        panel.grid.minor = element_blank())
+print(p_v5)
+```
+
+``` {r m5-forest-plot} 
+forest_params5 <- m5 %>%
+  filter(parameter %in% c("v_trialType", "a_trialType")) %>%
+  mutate(
+    label = recode(parameter,
+      "v_trialType" = "v: Trial Type",
+      "a_trialType" = "a: Trial Type"
+    ),
+    hdi_label = paste0("[", round(hdi_lo, 3), ", ", round(hdi_hi, 3), "]")
+  )
+
+p_forest5 <- ggplot(forest_params,
+                   aes(x = mean, y = reorder(label, mean), colour = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbarh(aes(xmin = hdi_lo, xmax = hdi_hi),
+                 height = 0.2, linewidth = 0.9) +
+  geom_point(size = 4) +
+  geom_text(aes(label = hdi_label),
+            hjust = 0, vjust = -0.8, size = 3, colour = "grey30") +
+  scale_colour_manual(
+    values = c("TRUE" = "#2ECC71", "FALSE" = "#E74C3C"),
+    labels = c("TRUE" = "HDI excludes 0", "FALSE" = "HDI includes 0")
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.2, 0.35))) +
+  labs(
+    title    = "Posterior Estimates: Trial Type Effects (M5)",
+    subtitle = "Mean \u00b1 94% HDI   |   Trial type only model",
+    x = "Posterior Mean (log-linear scale)", y = NULL, colour = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank())
+
+combined5 <- (p_a5 | p_v5) / p_forest5 +
+  plot_annotation(
+    title   = "DDM M5: Trial Type Effects -- Posterior Summary",
+    caption = "Sum contrast: Target Present = -0.5, Target Absent = +0.5.",
+    theme   = theme(plot.title = element_text(size = 15, face = "bold"))
+  )
+
+print(combined5)
+
+ggsave("ddm_m5_posterior_plots.png", combined5,
+       width = 14, height = 10, dpi = 180, bg = "white")
+
+```
+
+## 13) Factor Analysis for symptom dimensions
+```{r rq2-score-questionnaires}
+library(psych)
+
+ddm_raw <- read.csv("ddm/subjectEffects_M5.csv")%>%
+  rename(participant_id = subjectid)
+
+#ddm_clean <- ddm_raw %>%
+  #filter(participant_id %in% main_trials_clean$uid)
+
+survey_score <- read.csv("data/survey_score_data.csv")
+survey_analytic <- survey_score %>%
+  filter(participant_id %in% ddm_raw$participant_id) %>%
+  mutate(ocir_total = ocir_mean *18)
+
+efa_vars <- survey_analytic %>%
+  select(
+    pswq_total,     # Penn State Worry Questionnaire
+    gad7_total,     # Generalised Anxiety Disorder-7
+    phq8_total,     # PHQ-8 (depression)
+    ocir_mean      # OCI-R (obsessive-compulsive)
+  )
+
+cat("\nDescriptives:\n")
+print(psych::describe(efa_vars))
+
+cat("\nMissing values per variable:\n")
+print(colSums(is.na(efa_vars)))
+
+cat("\nMissing values per variable:\n")
+print(colSums(is.na(efa_vars)))
+
+# Listwise deletion
+efa_complete <- efa_vars[complete.cases(efa_vars), ]
+
+# Track which participant IDs survived listwise deletion (same order)
+participant_ids_complete <- survey_analytic %>%
+  filter(complete.cases(select(., gad7_total, phq8_total, ocir_total))) %>%
+  pull(participant_id)
+
+cat("\nN for EFA after listwise deletion:", nrow(efa_complete), "\n")
+```
+
+```{r rq2-efa-assumptions}
+# Correlation matrix
+cor_matrix <- cor(efa_complete, use = "complete.obs")
+cat("Correlation matrix:\n", print(round(cor_matrix, 2)))
+
+#Bartlett's test of spericity 
+# Significant result = coreelation matrix is not an identity matrix (shared variance exists)
+psych::cortest.bartlett(cor_matrix, n = nrow(efa_complete))
+
+# Kaiser-Meyer-Olkin measure of sampling 
+psych::KMO(efa_complete)
+```
+
+``` {r rq2-efa-parallel}
+set.seed(41)
+parallel_out <- psych::fa.parallel(
+  efa_complete,
+  fm     = "ml",
+  fa     = "fa",
+  n.iter = 1000,
+  sim    = TRUE,
+  main   = "Parallel Analysis Scree Plot"
+)
+
+cat("\nParallel analysis suggested factors:", parallel_out$nfact, "\n")
+```
+
+``` {r rq2-efa-fit}
+efa_1f <- psych::fa(
+  efa_complete,
+  nfactors = 1,
+  fm       = "ml",
+  rotate   = "none"
+)
+
+cat("=== 1-Factor EFA Solution ===\n")
+print(efa_1f$loadings, cutoff = 0.3)
+
+cat("\nCommunalities:\n")
+print(efa_1f$communality)
+
+cat("\nVariance explained:\n")
+print(efa_1f$Vaccounted)
+```
+
+```{r rq2-efa-scores}
+# Extract factor scores (standardised: mean = 0, SD = 1)
+factor_scores_df <- as.data.frame(efa_1f$scores)
+colnames(factor_scores_df) <- "Factor1"
+factor_scores_df$participant_id <- participant_ids_complete
+
+cat("Factor score summary:\n")
+print(psych::describe(factor_scores_df$Factor1))
+
+# Plot factor loadings
+loadings_df <- data.frame(
+  Measure = c("PSWQ", "GAD-7","PHQ-8", "OCI-R"),
+  Loading = as.numeric(efa_1f$loadings[,1])
+)
+
+ggplot(loadings_df, aes(x = Measure, y = Loading)) +
+  geom_col(fill = "steelblue", width = 0.5) +
+  geom_hline(yintercept = 0.3, linetype = "dashed", colour = "grey40") +
+  ylim(0, 1) +
+  labs(
+    title = "EFA Factor Loadings (1-Factor Solution)",
+    x     = "Measure",
+    y     = "Loading on Factor 1"
+  ) +
+  theme_minimal()
+```
+
+``` {r rq2-join}
+# reshape DDM output 
+ddm_wide <- ddm_raw%>%
+  select(participant_id, parameter, mean) %>%
+  pivot_wider(names_from = parameter, values_from = mean) 
+
+cat("DDM parameters:", print(names(ddm_wide)))
+cat("N Particiapnts in DDM output:", nrow(ddm_wide))
+
+# Join factor scores with DDM parameters
+rq2_data <- factor_scores_df %>%
+  inner_join (ddm_wide, by = "participant_id")
+
+cat("\nN participants in final RQ2 dataset:", nrow(rq2_data), "\n")
+cat("\nMissing values:\n", print(colSums(is.na(rq2_data))))
+
+cat("\nDDM parameter descriptives:\n")
+rq2_data %>%
+  select(a, a_trialType, v, v_trialType, t, z) %>%
+  psych::describe() %>%
+  print()
+```
+
+``` {r rq2-regressions}
+# Regress each DDM parameter onto the symptom factor score
+# Primary parameter of interest is a_trialType(Boundary sep effect), followed by a (overall boundary sep)
+reg_a         <- lm(a          ~ Factor1, data = rq2_data)
+reg_a_trial   <- lm(a_trialType ~ Factor1, data = rq2_data)
+reg_v         <- lm(v          ~ Factor1, data = rq2_data)
+reg_v_trial   <- lm(v_trialType ~ Factor1, data = rq2_data)
+reg_t         <- lm(t          ~ Factor1, data = rq2_data)
+
+cat("=== Boundary Separation (a) ===\n");        print(summary(reg_a))
+cat("=== Boundary Sep. x Condition ===\n");      print(summary(reg_a_trial))
+cat("=== Drift Rate (v) ===\n");                 print(summary(reg_v))
+cat("=== Drift Rate x Condition ===\n");         print(summary(reg_v_trial))
+cat("=== Non-Decision Time (t) ===\n");          print(summary(reg_t))
+```
+
+```{r rq2-results-table}
+# Formatted regression table
+tab_model(
+  reg_a, reg_a_trial, reg_v, reg_v_trial, reg_t,
+  dv.labels = c(
+    "Boundary Sep. (a)",
+    "Boundary Sep. × Condition",
+    "Drift Rate (v)",
+    "Drift Rate × Condition",
+    "Non-Decision Time (t)"
+  ),
+  pred.labels = c("Intercept", "Symptom Factor 1"),
+  show.stat   = TRUE,
+  show.fstat  = TRUE,
+  title = "RQ2: Regression of DDM Parameters onto Transdiagnostic Symptom Factor"
+)
+```
+
+```{r rq2-plot, fig.width = 9, fig.height = 5}
+# Scatter plots: Factor 1 against each DDM parameter
+rq2_long <- rq2_data %>%
+  select(participant_id, Factor1, a, a_trialType, v, v_trialType, t) %>%
+  pivot_longer(
+    cols      = c(a, a_trialType, v, v_trialType, t),
+    names_to  = "parameter",
+    values_to = "estimate"
+  ) %>%
+  mutate(parameter = factor(parameter,
+    levels = c("a", "a_trialType", "v", "v_trialType", "t"),
+    labels = c("Boundary Sep. (a)", "Boundary Sep. × Condition",
+               "Drift Rate (v)", "Drift Rate × Condition",
+               "Non-Decision Time (t)")
+  ))
+
+ggplot(rq2_long, aes(x = Factor1, y = estimate)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue", linewidth = 0.8) +
+  facet_wrap(~ parameter, scales = "free_y", ncol = 3) +
+  labs(
+    title = "DDM Parameters Regressed onto Transdiagnostic Symptom Factor",
+    x     = "Symptom Factor 1 Score",
+    y     = "DDM Parameter Estimate"
+  ) +
+  theme_minimal()
+```
+
+
